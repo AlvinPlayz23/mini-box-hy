@@ -33,10 +33,13 @@ type Backend struct {
 	Store    *container.Store
 	Images   *image.Store
 	Progress func(string)
-	// Network is used when starting containers; without it they start with no
-	// networking.
+	// Network is the hook used when starting containers; when nil, containers
+	// start with --network none.
 	Network container.NetworkHook
 
+	// labels are kept in memory keyed by container id: the runtime config has
+	// nowhere to persist them, so they are lost on daemon restart and invisible
+	// to other processes.
 	mu      sync.Mutex
 	labels  map[string]map[string]string
 	running map[string]*container.Started
@@ -378,13 +381,15 @@ func (b *Backend) CreateContainer(ctx context.Context, req api.CreateRequest) (a
 		return api.CreateResponse{}, err
 	}
 	cfg := &runtime.Config{
-		Image:      rec.Ref,
-		Args:       args,
-		Env:        mergeEnv(rec.Config.Config.Env, req.Env),
-		Cwd:        firstNonEmpty(req.WorkingDir, rec.Config.Config.WorkingDir, "/"),
-		User:       firstNonEmpty(req.User, rec.Config.Config.User),
-		Hostname:   req.Hostname,
-		Tty:        req.Tty,
+		Image:    rec.Ref,
+		Args:     args,
+		Env:      mergeEnv(rec.Config.Config.Env, req.Env),
+		Cwd:      firstNonEmpty(req.WorkingDir, rec.Config.Config.WorkingDir, "/"),
+		User:     firstNonEmpty(req.User, rec.Config.Config.User),
+		Hostname: req.Hostname,
+		Tty:      req.Tty,
+		// OpenStdin is recorded, but attached stdin is not streamed by the
+		// API yet.
 		Stdin:      req.OpenStdin,
 		Detach:     true,
 		AutoRemove: req.HostConfig.AutoRemove,
@@ -392,10 +397,6 @@ func (b *Backend) CreateContainer(ctx context.Context, req api.CreateRequest) (a
 		Rootfs:     runtime.Rootfs{Lower: []string{b.Images.LayerDir(rec.ChainID)}, Overlay: true},
 		Created:    time.Now().UTC(),
 	}
-	if cfg.Hostname == "" {
-		cfg.Hostname = "minibox"
-	}
-	cfg.Network.Hostname = cfg.Hostname
 	mode, err := networkMode(req.HostConfig.NetworkMode)
 	if err != nil {
 		return api.CreateResponse{}, err
@@ -449,6 +450,18 @@ func (b *Backend) CreateContainer(ctx context.Context, req api.CreateRequest) (a
 	c, err := container.Create(b.Store, cfg, "")
 	if err != nil {
 		return api.CreateResponse{}, err
+	}
+	// The id only exists after Create, so the default hostname is applied and
+	// persisted here.
+	if req.Hostname == "" {
+		cfg.Hostname = shortID(c.ID)
+	}
+	cfg.Network.Hostname = cfg.Hostname
+	if req.Hostname == "" {
+		if err := cfg.Save(c.ConfigPath()); err != nil {
+			_ = container.Remove(b.Store, c, true)
+			return api.CreateResponse{}, fmt.Errorf("save container config: %w", err)
+		}
 	}
 	if len(req.Labels) > 0 {
 		b.mu.Lock()
@@ -899,8 +912,15 @@ func (b *Backend) ListImages(ctx context.Context) ([]api.ImageSummary, error) {
 		if err != nil {
 			continue
 		}
+		id := rec.Digest
+		if id == "" {
+			id = rec.ChainID
+		}
+		if id != "" && !strings.HasPrefix(id, "sha256:") {
+			id = "sha256:" + id
+		}
 		out = append(out, api.ImageSummary{
-			ID:          "sha256:" + rec.ChainID,
+			ID:          id,
 			RepoTags:    []string{ref.Familiar()},
 			Created:     rec.Created.Unix(),
 			Size:        rec.Size,
@@ -914,7 +934,7 @@ func (b *Backend) ListImages(ctx context.Context) ([]api.ImageSummary, error) {
 func (b *Backend) InspectImage(ctx context.Context, name string) (json.RawMessage, error) {
 	rec, err := b.Images.ResolveRecord(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("no such image %q: %w", name, err)
 	}
 	return json.Marshal(rec)
 }
