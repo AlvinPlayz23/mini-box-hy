@@ -16,23 +16,90 @@ Environment: Linux 4.19.0-gvisor, 2 vCPU, x86_64, warm page cache, Go 1.23.12,
 | Measurement | Value |
 |---|---|
 | Binary size | 7,131,288 bytes (6.8 MiB) after M8, 8.1 MB after M9/M10 - target under 15 MB |
-| `pull alpine:3.20` (3.5 MiB, 1 layer) | about 0.8 s wall |
-| `pull nginx:alpine` (25.1 MiB, 8 layers) | 1.91 s wall, peak RSS 27.9 MB |
-| `pull nginx:alpine` again (warm store) | 0.65 s wall |
-| `pull python:3.12-slim` (42 MB compressed, 112 MB unpacked) | 2.98 s wall, peak RSS 27.2 MB |
-| Disk after `pull nginx:alpine` | blobs 26 MB + layers 60 MB |
-| Disk after `pull python:3.12-slim` | blobs 42 MB + layers 112 MB |
+| Pulls, memory and disk across six images | see the image matrix below |
 
-Peak RSS is flat at about 28 MB whether the image is 3.5 MiB or 42 MB, which is
-the evidence that layers are streamed to disk and unpacked from disk instead of
-being buffered in memory (PLAN.md section 5 asks for this number to be
-recorded).
+Peak RSS stays between 27 MB and 52 MB whether the image is 2 MB or 3.5 GiB,
+which is the evidence that layers are streamed to disk and unpacked from disk
+instead of being buffered in memory (PLAN.md section 5 asks for this number to
+be recorded).
 
 Test suite at the time of writing: 191 test/fuzz functions in 33 files (87 in
 20 files at M8; M9 added volume, compose, build, API and daemon tests). The tar
 extractor fuzzers ran about 200,000 executions (`FuzzCleanEntryPath`) and about
 26,000 executions (`FuzzUnpackStaysInDest`) without finding a path that escapes
 the layer directory.
+
+## Comparing against Docker, Podman and crun
+
+The comparison harness is `bench/run.sh`: it measures `minibox run --rm` against
+`docker run --rm`, `podman run --rm` and a raw `crun` bundle on the same machine,
+the same image and the same command, using `hyperfine --warmup 5 --runs 50` when
+hyperfine is present and a shell timing loop otherwise. `bench/README.md`
+documents the flags, and `bench/make-bundle.sh` builds the crun bundle.
+
+**Status: no comparison numbers yet, and this is a limitation of the development
+sandbox, not an omission.** The sandbox is a gVisor-based container:
+
+* it cannot create namespaces (`unshare --mount --pid --fork` returns
+  `Operation not permitted`), so neither minibox, docker, podman nor crun can
+  start a container here;
+* podman is not even installable (`apt-get install -y podman` -> `E: Unable to
+  locate package podman`), and docker.io would need a working dockerd plus
+  cgroups and iptables that this kernel surface does not provide.
+
+So the honest state is: the method is fixed and reproducible, the numbers are
+pending. On a real Linux host (or VM) with cgroup v2:
+
+```console
+$ make bench                                  # alpine:3.20 true, 50 runs
+$ RUNS=100 bench/run.sh debian:stable-slim cat /etc/os-release
+$ BENCH_APPEND=1 bench/run.sh                 # append the table here
+```
+
+The integration suite's `TestM10StartupAndSize` records the CLI-side floor
+(process spawn plus runtime init) on any host that can run the binary, and
+`bench/startup.sh` records the same numbers with a shell harness.
+
+## Image matrix (pull, memory, disk)
+
+`bench/matrix.sh` pulls every image in `bench/images.txt` into a fresh state
+root and records wall time, peak RSS and on-disk footprint:
+
+```console
+$ bench/matrix.sh                    # all images
+$ bench/matrix.sh alpine:3.20        # just one
+$ BENCH_APPEND=1 bench/matrix.sh     # append the table to this file
+```
+
+Measured in the development sandbox (gVisor, 2 vCPU, warm page cache). The
+table below is exactly what `bench/matrix.sh` prints:
+
+| image | layers | pull wall | peak RSS | blobs on disk | layers on disk |
+|---|---|---|---|---|---|
+| alpine:3.20 | 1 | 1.14 s | 29.0 MB | 3.5 MB | 7.5 MB |
+| busybox:1.36 | 1 | 1.08 s | 27.3 MB | 2.2 MB | 4.3 MB |
+| debian:stable-slim | 1 | 4.69 s | 29.5 MB | 29 MB | 76 MB |
+| nginx:alpine | 8 | 8.77 s | 34.5 MB | 26 MB | 60 MB |
+| python:3.12-slim | 4 | 10.06 s | 43.2 MB | 42 MB | 112 MB |
+| ollama/ollama:latest (AI) | 4 | 4 m 29 s | 52.4 MB | 3.6 GB | 5.2 GB |
+
+Wall times vary with registry rate limiting between runs (the earlier
+single-image runs in this file were faster; Docker Hub throttles anonymous
+pulls), so compare rows within one matrix run rather than across runs.
+
+The AI image is the interesting one for memory: **3.5 GiB compressed and 5.2 GiB
+unpacked, and peak RSS stayed at 52 MB**, which is the streaming-unpack claim
+from M6 holding up at a scale 40x larger than the previous largest test image.
+Its image config resolves correctly too (`Entrypoint ["/bin/ollama"]`,
+`Cmd ["serve"]`, `ExposedPorts 11434/tcp`), so `minibox run -p 11434:11434
+ollama/ollama` is the right command once a host that can run containers is
+available. Note the disk numbers: this one image costs about 8.7 GB in the
+store (blobs plus unpacked chain), which is why `system prune` and `rmi` exist.
+
+`internal/image` carries the same matrix as a test
+(`TestPullImageMatrix`: busybox, debian, python; set `MINIBOX_TEST_AI_IMAGES=1`
+to add ollama), so the spread of image shapes is exercised by CI rather than
+only by hand.
 
 ## M10 performance pass
 

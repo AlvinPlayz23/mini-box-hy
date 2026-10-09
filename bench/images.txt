@@ -1,0 +1,11 @@
+# Images the benchmark matrix pulls and measures, one per line:
+#   IMAGE[:TAG]    # category
+# Keep the first entries small so a quick run stays quick; the AI entries are
+# large on purpose and need a host with disk and bandwidth to spare.
+alpine:3.20          # minimal, single layer
+busybox:1.36         # minimal, single layer
+debian:stable-slim   # apt-based, a few layers
+nginx:alpine         # multi-layer web server
+python:3.12-slim     # language runtime, large layer count
+ollama/ollama:latest # ai: local LLM server (very large)
+

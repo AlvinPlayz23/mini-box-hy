@@ -9,6 +9,11 @@ RUNS=100 bench/run.sh debian:stable-slim cat /etc/os-release
 BENCH_APPEND=1 bench/run.sh      # also append the numbers to docs/BENCHMARKS.md
 ```
 
+`bench/matrix.sh` is the image spread: it pulls everything listed in
+`bench/images.txt` (minimal, apt-based, multi-layer, language runtime, and a
+multi-GiB AI image) and records pull wall time, peak RSS and disk per image.
+`bench/startup.sh` measures the CLI's own startup floor.
+
 Requirements:
 
 * `hyperfine` for the primary path; without it the script falls back to a shell

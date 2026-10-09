@@ -123,6 +123,7 @@ choice.
 ## Testing
 
 ```console
+$ bench/matrix.sh        # pull/memory/disk across bench/images.txt (incl. an AI image)
 $ make test              # unit tests, no root, no network (-short)
 $ make test-network      # also runs live registry pull tests
 $ make test-integration  # namespaces/cgroups/overlay/network, needs root
