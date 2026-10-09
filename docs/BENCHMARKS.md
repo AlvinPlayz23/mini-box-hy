@@ -15,7 +15,7 @@ Environment: Linux 4.19.0-gvisor, 2 vCPU, x86_64, warm page cache, Go 1.23.12,
 
 | Measurement | Value |
 |---|---|
-| Binary size | 7,131,288 bytes (6.8 MiB) - target under 15 MB |
+| Binary size | 7,131,288 bytes (6.8 MiB) after M8, 8.1 MB after M9/M10 - target under 15 MB |
 | `pull alpine:3.20` (3.5 MiB, 1 layer) | about 0.8 s wall |
 | `pull nginx:alpine` (25.1 MiB, 8 layers) | 1.91 s wall, peak RSS 27.9 MB |
 | `pull nginx:alpine` again (warm store) | 0.65 s wall |
@@ -28,7 +28,8 @@ the evidence that layers are streamed to disk and unpacked from disk instead of
 being buffered in memory (PLAN.md section 5 asks for this number to be
 recorded).
 
-Test suite at the time of writing: 87 test/fuzz functions in 20 files; the tar
+Test suite at the time of writing: 191 test/fuzz functions in 33 files (87 in
+20 files at M8; M9 added volume, compose, build, API and daemon tests). The tar
 extractor fuzzers ran about 200,000 executions (`FuzzCleanEntryPath`) and about
 26,000 executions (`FuzzUnpackStaysInDest`) without finding a path that escapes
 the layer directory.
@@ -40,7 +41,7 @@ these verified numbers in the development sandbox:
 
 | Measurement | Value |
 |---|---|
-| Binary size after M10 | 7.1 MB (budget 15 MB) |
+| Binary size after M9/M10 | 8.1 MB (budget 15 MB; M9 added the compose parser, the Dockerfile parser, the API server and the daemon backend) |
 | `minibox version` wall time | 16 ms minimum over 30 runs (bash spawn + exec + Go runtime init; the floor is the sandbox's process-spawn cost) |
 | `minibox ps`, `minibox images` | 16-17 ms minimum, the same floor |
 | Idle RAM | 0: no daemon process exists |

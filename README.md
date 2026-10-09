@@ -35,7 +35,7 @@ which parts still need a real Linux host to verify.
 ## Build and install
 
 ```console
-$ make build            # bin/minibox, static, ~7 MB
+$ make build            # bin/minibox, static, ~8 MB
 $ sudo make install     # /usr/local/bin/minibox
 ```
 
