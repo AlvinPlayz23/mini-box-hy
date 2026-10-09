@@ -3,6 +3,10 @@
 package integration
 
 import (
+	"context"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -183,6 +187,68 @@ func TestM10StartupAndSize(t *testing.T) {
 	t.Logf("minibox version: %s per run over %d runs (includes process spawn)", perRun, runs)
 	if perRun > 200*time.Millisecond {
 		t.Errorf("CLI startup is %s per run, expected well under 200ms", perRun)
+	}
+}
+
+// M9: the Docker-compatible API answers over a unix socket.
+func TestM9ApiServer(t *testing.T) {
+	ensureImage(t)
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "minibox.sock")
+	cmd := exec.Command(binPath, "serve", "--socket", socket)
+	cmd.Env = append(os.Environ(), "MINIBOX_ROOT="+rootDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start serve: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(socket); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the API socket never appeared")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+			},
+		},
+	}
+	get := func(path string) (int, string) {
+		t.Helper()
+		resp, err := client.Get("http://unix" + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+
+	if code, body := get("/_ping"); code != 200 || !strings.Contains(body, "OK") {
+		t.Errorf("ping = %d %q", code, body)
+	}
+	if code, body := get("/version"); code != 200 || !strings.Contains(body, "ApiVersion") {
+		t.Errorf("version = %d %q", code, body)
+	}
+	if code, body := get("/images/json"); code != 200 || !strings.Contains(body, "RepoTags") {
+		t.Errorf("images = %d %q", code, body)
+	}
+	if code, body := get("/containers/json?all=1"); code != 200 || !strings.HasPrefix(strings.TrimSpace(body), "[") {
+		t.Errorf("containers = %d %q", code, body)
+	}
+	if code, _ := get("/nope"); code != 404 {
+		t.Errorf("unknown route returned %d, want 404", code)
 	}
 }
 
