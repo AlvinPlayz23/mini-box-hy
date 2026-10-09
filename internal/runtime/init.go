@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -398,5 +397,3 @@ func errorsIsReadOnly(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "read-only file system") ||
 		strings.Contains(err.Error(), "permission denied"))
 }
-
-var _ = exec.LookPath

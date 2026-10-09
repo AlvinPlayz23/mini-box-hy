@@ -5,7 +5,6 @@ package container
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -525,5 +524,3 @@ func ParsePID(data string) (int, error) {
 	}
 	return pid, nil
 }
-
-var _ io.Reader

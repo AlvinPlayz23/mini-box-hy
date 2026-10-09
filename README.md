@@ -116,6 +116,8 @@ real Linux host or VM; `scripts/run-integration.sh` sets up the temp state root.
 * Volumes are bind mounts and tmpfs; there are no named volumes.
 * `exec` works for rootful containers; rootless `exec` would need a
   user-namespace join, which is not implemented (see `docs/SECURITY.md`).
+* `run -d -t` does not allocate a pseudo-terminal yet; detached containers log
+  to `containers/<id>/log` and `minibox logs -f` follows it.
 * Images are unpacked per image (flattened chain): two images sharing a base
   layer store it twice. Layer-level sharing is future work.
 * The seccomp default profile starts permissive-but-documented: it permits the

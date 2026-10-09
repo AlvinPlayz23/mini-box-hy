@@ -85,7 +85,6 @@ func execCommand(env *Env, args []string) int {
 
 	cmd := exec.Command(self, cmdArgs...)
 	cmd.Env = os.Environ()
-	var cleanup func()
 	if opts.tty {
 		pty, err := container.OpenPTY()
 		if err != nil {
@@ -99,11 +98,9 @@ func execCommand(env *Env, args []string) int {
 		rows, cols := container.TerminalSize(env.Stdin)
 		_ = pty.SetWinsize(rows, cols)
 		go container.CopyPTY(pty.Master, env.Stdin, env.StdoutFile)
-		cleanup = func() {}
 	} else {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = env.Stdin, env.StdoutFile, env.StderrFile
 	}
-	_ = cleanup
 	if err := cmd.Run(); err != nil {
 		code, _ := runtime.ExitCode(err)
 		return code
