@@ -33,6 +33,36 @@ extractor fuzzers ran about 200,000 executions (`FuzzCleanEntryPath`) and about
 26,000 executions (`FuzzUnpackStaysInDest`) without finding a path that escapes
 the layer directory.
 
+## M10 performance pass
+
+The M10 work (profiling hooks, lazy initialisation, runtime tuning) produced
+these verified numbers in the development sandbox:
+
+| Measurement | Value |
+|---|---|
+| Binary size after M10 | 7.1 MB (budget 15 MB) |
+| `minibox version` wall time | 16 ms minimum over 30 runs (bash spawn + exec + Go runtime init; the floor is the sandbox's process-spawn cost) |
+| `minibox ps`, `minibox images` | 16-17 ms minimum, the same floor |
+| Idle RAM | 0: no daemon process exists |
+
+What changed in M10:
+
+* `minibox version`, `help`, `init` and `minibox-init` no longer open the state
+  root, create directories or touch the image store, so the most common
+  "is it installed" commands do the minimum possible work.
+* `MINIBOX_PROFILE=cpu|heap|trace|mutex|block|goroutine` makes any command
+  write a profile (`MINIBOX_PROFILE_PATH` picks the file), which is how the hot
+  path was inspected without adding flags to every subcommand.
+* The detached shim calls `TuneShimRuntime`: `GOGC=50` and a 64 MiB soft memory
+  limit (`MINIBOX_SHIM_MEMLIMIT` overrides it), which keeps a mostly-idle
+  supervisor small.
+* `--network none` containers skip reading `/etc/resolv.conf` entirely.
+
+The remaining M10 items need a real host: `strace -T -f`/`perf trace` on the
+run path (neither tool exists in the sandbox), the per-run syscall audit, and
+the final comparison table against Docker, Podman and `crun`. `bench/startup.sh`
+records the CLI-side numbers; `bench/run.sh` records the container-side ones.
+
 ## Pending measurements (need a real Linux host)
 
 | Metric | Target | Command |

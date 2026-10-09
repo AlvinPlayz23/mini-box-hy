@@ -10,6 +10,7 @@ requires. Format: what was decided, why, and what it costs.
 | `golang.org/x/sys/unix` | mount, pivot_root, prctl, capset, setns, ioctl, xattr, mknod wrappers | `syscall` alone lacks many of these wrappers and constants |
 | `github.com/vishvananda/netlink` + `netns` | veth pairs, bridge, addresses, routes, and netlink handles bound to another namespace for bridge mode | hand-rolled netlink messages: hundreds of lines of message encoding that cannot be tested in a sandbox without `CAP_NET_ADMIN`, so correctness risk was judged too high for M7 |
 | `github.com/klauspost/compress` (zstd) | OCI zstd layers (PLAN.md M6 requires gzip **and** zstd) | shelling out to `zstd`, or dropping zstd support |
+| `gopkg.in/yaml.v3` | M9 compose support (`minibox up`/`down`): a correct YAML parser is not something to hand-roll, and this is the de-facto standard pure-Go one | writing a YAML subset parser (unsafe for real compose files) or requiring JSON compose files |
 
 Deliberately **not** used:
 
@@ -135,6 +136,68 @@ namespace bug and is what the M1 acceptance test uses.
    no dependency was added.
 4. **Socket-activated helper for warm state:** not for now. The daemonless path
    is kept; this is revisited after M10 numbers exist.
+
+## M9 and M10 choices
+
+**Named volumes are directories, not filesystem images.** `<root>/volumes/<name>/_data`
+is bind-mounted into the container; there is no volume driver interface, no
+NFS/CSI support and no quota. `docker volume`-style plugins are out of scope for
+v1. In-use tracking is done by scanning container configs, which is O(containers)
+and fine at this scale.
+
+**Health probes reuse `exec-child`.** The supervisor cannot `setns` safely in a
+multithreaded Go process, so each probe re-executes minibox and joins the
+container's namespaces, exactly like `minibox exec`. Cost: one short-lived
+process per probe. Benefit: one code path for "run a command inside a container",
+and the probe genuinely runs inside the container's namespaces.
+
+**Restart policies are enforced by the shim only.** A foreground `run` returns
+when the container exits, so `--restart` without `-d` is a usage error rather
+than a silently ignored flag. `unless-stopped` currently behaves like `always`
+(minibox has no daemon remembering an explicit stop across a supervisor
+restart); that is documented in the CLI help.
+
+**Build caching is per instruction prefix, but the output is base layers plus
+one cumulative delta.** Docker creates one layer per instruction; minibox tars
+the whole overlay upper directory after each filesystem-changing step and keeps
+only the last one as the image's layer. This keeps the code small and makes
+whiteouts free (overlayfs writes them into the upper directory, and the
+extractor already understands them), at the cost of not being able to share
+intermediate layers between images. A future version can snapshot deltas by
+diffing the upper directory between steps.
+
+**Build steps run with the full capability set and no network.** Package
+managers need capabilities that the Docker-like default set lacks, and the
+build's commands are as trusted as the Dockerfile author. Networking is off by
+default so builds are reproducible; a future `--network` build flag can relax
+that.
+
+**`COPY --from=<stage>` is not implemented.** Multi-stage builds parse, and the
+target stage builds correctly, but copying from an earlier stage needs that
+stage's rootfs to be built and kept, which is a larger change than the rest of
+the build feature. The error message says exactly that.
+
+**The Docker API is a documented subset, served from a normal process.** There
+is no socket activation: the plan lists it as an option ("Decide only after M10
+numbers"), and the M10 numbers show no warm-state problem to solve (there is no
+daemon to warm up, and the CLI starts in milliseconds). A systemd unit with
+`minibox serve` gives the same on-demand behaviour without a second code path.
+
+**Lazy pulling (eStargz/SOCI) is not implemented.** The options were: (a) SOCI
+or eStargz index plus HTTP range requests, which still needs a FUSE mount or
+kernel overlay tricks to expose a partially downloaded filesystem, (b) a
+custom lazy layer filesystem, (c) a "download the first layer and start"
+heuristic, which is wrong for images whose entrypoint lives in the last layer.
+All three are large, and (a) also needs an external index to exist for the
+image. The simplest option that preserves correctness is the current streaming
+unpack, which already never buffers a whole layer in memory; lazy pulling is
+left as future work with this note as the starting point.
+
+**Seccomp is still the permissive default.** M8 shipped the builder and the
+Docker-like denied set; M9/M10 did not tighten it, because an incomplete
+allow-list breaks real images and could not be integration-tested in the
+development sandbox. `docs/SECURITY.md` lists it as gap #1 and the builder
+already supports strict profiles.
 
 ## Deviations from PLAN.md worth knowing
 

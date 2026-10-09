@@ -78,6 +78,49 @@ containers share read-only layers and their writes are private.
 resolved configuration (so a read-only rootfs can be handled before it is
 remounted).
 
+## Volumes, health checks and restart policies
+
+Named volumes live in `<root>/volumes/<name>/_data` with a `volume.json` beside
+them; `-v NAME:DST` resolves a name to that directory (creating the volume on
+first use) and host paths are used as-is. A volume referenced by any container
+config cannot be removed without `-f`, and `system prune` collects the ones
+nobody uses.
+
+A health check runs `exec-child` (the same helper `minibox exec` uses) inside
+the container on the configured interval and records `starting`, `healthy` or
+`unhealthy` plus the consecutive failure count in `state.json`, where `ps` and
+`inspect` read it. Failures inside `--health-start-period` are ignored.
+
+Restart policies are enforced by the detached container's shim, which loops
+start/wait/restart while the policy and the exit code say so, incrementing the
+`restarts` counter in `state.json`. Foreground runs return when the container
+exits and therefore refuse `--restart`.
+
+## Build, compose and the API
+
+`minibox build` parses the Dockerfile subset with `internal/build`, mounts one
+overlay workspace over the base image's chain directory, runs each `RUN` as a
+real container with that workspace as its root, copies `COPY` inputs through
+the context-safety checks in `internal/build`, and after every filesystem
+change tars the overlay's upper directory into a layer blob. Cache entries keyed
+by the instruction prefix and the hashed contents of the `COPY` inputs let a
+rebuild resume at the first changed instruction. The finished image is
+registered exactly like a pulled one, so `run`, `ps` and `rmi` treat it the
+same.
+
+`minibox up` parses a compose file into a project, orders the services by
+`depends_on`, maps each service onto a `runtime.Config` (the same mapping the
+`run` flags use) and starts them detached with compose-style names
+(`<project>_<service>_1`). `down` stops and removes every container of the
+project and, with `--volumes`, the volumes it left behind.
+
+`minibox serve` exposes the subset of the Docker Engine API implemented in
+`internal/api` (ping, version, info, containers create/start/stop/kill/restart/
+remove/wait/inspect/logs, images list/inspect/pull) over a unix socket, with
+`internal/daemon` adapting the API's `Backend` interface onto the store and
+lifecycle. The socket is not socket-activated; a systemd unit can start it on
+demand.
+
 ## Security defaults
 
 Capabilities are reduced to the Docker-like set (with `--cap-add`/`--cap-drop`),

@@ -43,7 +43,7 @@ func psCommand(env *Env, args []string) error {
 		return enc.Encode(states)
 	}
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CONTAINER ID\tNAME\tIMAGE\tCOMMAND\tSTATUS\tEXIT\tCREATED")
+	fmt.Fprintln(tw, "CONTAINER ID\tNAME\tIMAGE\tCOMMAND\tSTATUS\tHEALTH\tEXIT\tCREATED")
 	for _, st := range states {
 		name := st.Name
 		if name == "" {
@@ -53,8 +53,16 @@ func psCommand(env *Env, args []string) error {
 		if st.Status == container.StatusExited {
 			exit = fmt.Sprintf("%d", st.ExitCode)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			short(st.ID), name, st.Image, truncate(st.Command, 40), st.Status, exit, humanAge(st.CreatedAt))
+		health := st.Health
+		if health == "" {
+			health = "-"
+		}
+		status := string(st.Status)
+		if st.Restarts > 0 {
+			status = fmt.Sprintf("%s (%d restarts)", status, st.Restarts)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			short(st.ID), name, st.Image, truncate(st.Command, 40), status, health, exit, humanAge(st.CreatedAt))
 	}
 	return tw.Flush()
 }

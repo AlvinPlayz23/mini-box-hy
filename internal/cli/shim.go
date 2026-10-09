@@ -72,6 +72,7 @@ func startDetached(env *Env, id string, cfg *runtime.Config) error {
 // shimCommand is the hidden `minibox shim` entry point: it supervises a
 // detached container, owns its log file and cleans up when it exits.
 func shimCommand(env *Env, args []string) int {
+	TuneShimRuntime()
 	id := os.Getenv(shimEnv)
 	if id == "" {
 		fmt.Fprintln(os.Stderr, "minibox shim: MINIBOX_SHIM_ID is not set")
@@ -103,27 +104,45 @@ func shimCommand(env *Env, args []string) int {
 	defer devNull.Close()
 
 	env.Progress = func(msg string) { fmt.Fprintf(logFile, "minibox: %s\n", msg) }
-	startOpts := container.StartOptions{
-		Stdin:    devNull,
-		Stdout:   logFile,
-		Stderr:   logFile,
-		Network:  networkHook(),
-		Progress: env.Progress,
-		Detach:   true,
-		Rootless: os.Geteuid() != 0,
-	}
-	started, err := container.Start(context.Background(), env.Store, id, startOpts)
+	cfg, err := runtime.LoadConfig(c.ConfigPath())
 	if err != nil {
-		cleanupFailedStart(env, id)
 		return fail(err)
 	}
-	if report != nil {
-		fmt.Fprintf(report, "started %d\n", started.Init.PID())
-		report.Close()
+
+	restarts := 0
+	for {
+		startOpts := container.StartOptions{
+			Stdin:    devNull,
+			Stdout:   logFile,
+			Stderr:   logFile,
+			Network:  networkHook(),
+			Progress: env.Progress,
+			Detach:   true,
+			Rootless: os.Geteuid() != 0,
+		}
+		started, err := container.Start(context.Background(), env.Store, id, startOpts)
+		if err != nil {
+			cleanupFailedStart(env, id)
+			return fail(err)
+		}
+		if report != nil {
+			fmt.Fprintf(report, "started %d\n", started.Init.PID())
+			report.Close()
+			report = nil
+		}
+		code, waitErr := started.Wait(context.Background())
+		if waitErr != nil {
+			fmt.Fprintf(logFile, "minibox: %v\n", waitErr)
+		}
+		if !container.ShouldRestart(cfg.Restart, 0, restarts, code) {
+			return code
+		}
+		restarts++
+		if live, err := container.Load(env.Store, id); err == nil {
+			live.State.Restarts = restarts
+			_ = live.SaveState()
+		}
+		fmt.Fprintf(logFile, "minibox: restarting (policy %s, restart %d) after exit code %d\n", cfg.Restart, restarts, code)
+		time.Sleep(200 * time.Millisecond)
 	}
-	code, err := started.Wait(context.Background())
-	if err != nil {
-		fmt.Fprintf(logFile, "minibox: %v\n", err)
-	}
-	return code
 }

@@ -24,14 +24,20 @@ const (
 
 // State is the mutable state of a container, stored in state.json.
 type State struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name,omitempty"`
-	Image      string    `json:"image"`
-	Command    string    `json:"command"`
-	Status     Status    `json:"status"`
-	PID        int       `json:"pid,omitempty"`
-	ExitCode   int       `json:"exit_code"`
-	OOMKilled  bool      `json:"oom_killed,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	Image     string `json:"image"`
+	Command   string `json:"command"`
+	Status    Status `json:"status"`
+	PID       int    `json:"pid,omitempty"`
+	ExitCode  int    `json:"exit_code"`
+	OOMKilled bool   `json:"oom_killed,omitempty"`
+	// Health is the last health probe result: starting, healthy or unhealthy.
+	Health string `json:"health,omitempty"`
+	// HealthFailures counts consecutive failed probes.
+	HealthFailures int `json:"health_failures,omitempty"`
+	// Restarts counts how many times the shim restarted the container.
+	Restarts   int       `json:"restarts,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`

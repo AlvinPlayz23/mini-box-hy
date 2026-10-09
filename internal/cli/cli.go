@@ -60,6 +60,33 @@ func NewEnv() (*Env, error) {
 
 // Run dispatches a minibox invocation and returns the process exit code.
 func Run(args []string) int {
+	if len(args) == 0 {
+		printUsage(os.Stdout)
+		return 0
+	}
+	stop := startProfiling(args[0])
+	defer stop()
+
+	// Commands that need neither the store nor an environment: handling them
+	// before NewEnv keeps startup minimal for the common `version`/`help`
+	// cases (M10: lazy initialisation of everything not needed for a command).
+	switch args[0] {
+	case "version", "--version", "-v":
+		fmt.Fprintf(os.Stdout, "minibox %s\n", Version)
+		return 0
+	case "help", "--help", "-h":
+		printUsage(os.Stdout)
+		return 0
+	case "init":
+		if err := runtime.Init(); err != nil {
+			fmt.Fprintf(os.Stderr, "minibox init: %v\n", err)
+			return 126
+		}
+		return 0
+	case "minibox-init":
+		return runtime.Reap(args[1:])
+	}
+
 	env, err := NewEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "minibox: %v\n", err)
@@ -106,19 +133,15 @@ func RunWithEnv(env *Env, args []string) int {
 		runErr = inspectCommand(env, rest)
 	case "system":
 		runErr = systemCommand(env, rest)
-	case "version", "--version", "-v":
-		fmt.Fprintf(env.Stdout, "minibox %s\n", Version)
-	case "help", "--help", "-h":
-		printUsage(env.Stdout)
+	case "volume":
+		runErr = volumeCommand(env, rest)
+	case "build":
+		runErr = buildCommand(env, rest)
+	case "up":
+		runErr = upCommand(env, rest)
+	case "down":
+		runErr = downCommand(env, rest)
 	// Hidden commands used by the runtime.
-	case "init":
-		if err := runtime.Init(); err != nil {
-			fmt.Fprintf(os.Stderr, "minibox init: %v\n", err)
-			return 126
-		}
-		return 0
-	case "minibox-init":
-		return runtime.Reap(rest)
 	case "shim":
 		return shimCommand(env, rest)
 	case "exec-child":
@@ -206,6 +229,10 @@ Usage:
   minibox rm [-f] CONTAINER...           remove containers
   minibox inspect CONTAINER|IMAGE        print JSON details
   minibox system prune                   remove stopped containers and unused data
+  minibox volume create|ls|rm|inspect|prune   manage named volumes
+  minibox build [-t NAME:TAG] [-f DOCKERFILE] [CONTEXT]   build an image
+  minibox up [-f FILE] [-d] [SERVICE...]  start a compose project
+  minibox down [-f FILE] [--volumes]      stop and remove a compose project
   minibox version                        print the version
 
 run flags:
@@ -215,6 +242,7 @@ run flags:
   -it                    allocate a tty and keep stdin open
   -e, --env KEY=VAL      set an environment variable (repeatable)
   -v, --volume SRC:DST   bind mount (add :ro for read-only, tmpfs:DST for tmpfs)
+                         SRC may be a named volume (see minibox volume create)
   -w, --workdir DIR      working directory
   -u, --user USER[:GRP]  run as this user
   -p, --publish P:C      publish a container port on the host (repeatable)
@@ -229,6 +257,10 @@ run flags:
       --cap-add CAP      add a capability (repeatable, or ALL)
       --cap-drop CAP     drop a capability (repeatable, or ALL)
       --seccomp PROFILE  default or unconfined
+      --restart POLICY   no, on-failure[:max], always or unless-stopped (needs -d)
+      --health-cmd CMD   shell command probed inside the container
+      --health-interval D --health-timeout D --health-retries N
+      --health-start-period D
       --platform OS/ARCH select the image platform
 
 State lives under $MINIBOX_ROOT (default /var/lib/minibox for root,

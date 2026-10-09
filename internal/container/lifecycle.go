@@ -55,16 +55,18 @@ type StartOptions struct {
 
 // Started is a running container.
 type Started struct {
-	ID       string
-	Config   *runtime.Config
-	Init     *runtime.InitProcess
-	Cgroup   *cgroup.Cgroup
-	Rootfs   storage.RootfsPaths
-	PTY      *PTY
-	cleanup  []func() error
-	network  runtime.Network
-	hadNet   bool
-	progress func(string)
+	ID     string
+	Config *runtime.Config
+	Init   *runtime.InitProcess
+	Cgroup *cgroup.Cgroup
+	Rootfs storage.RootfsPaths
+	PTY    *PTY
+	// stopHealth stops the health probe loop, if one is running.
+	stopHealth func()
+	cleanup    []func() error
+	network    runtime.Network
+	hadNet     bool
+	progress   func(string)
 }
 
 // Create allocates a container directory, writes config.json and state.json and
@@ -316,6 +318,9 @@ func Start(ctx context.Context, store *Store, id string, opts StartOptions) (*St
 	c.State.Status = StatusRunning
 	c.State.PID = initProc.PID()
 	c.State.StartedAt = time.Now().UTC()
+	if cfg.HealthCheck != nil {
+		s.stopHealth = startHealthMonitor(store, id, cfg)
+	}
 	if err := c.SaveState(); err != nil {
 		s.cleanupAll()
 		return nil, err
@@ -326,6 +331,9 @@ func Start(ctx context.Context, store *Store, id string, opts StartOptions) (*St
 // Wait blocks until the container exits, then tears everything down and
 // records the exit status.
 func (s *Started) Wait(ctx context.Context) (int, error) {
+	if s.stopHealth != nil {
+		defer s.stopHealth()
+	}
 	code, err := s.Init.Wait()
 	oom := false
 	if s.Cgroup != nil {

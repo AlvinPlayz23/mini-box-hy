@@ -20,6 +20,53 @@ import (
 // memory.
 const maxConfigSize = 8 << 20
 
+// StoreBlobFromReader streams r into the blob store and returns the digest and
+// size of what was written. Builds use it to add layers they produced
+// themselves.
+func (s *Store) StoreBlobFromReader(r io.Reader) (string, int64, error) {
+	if err := s.EnsureDirs(); err != nil {
+		return "", 0, err
+	}
+	tmp, err := s.TempBlobPath()
+	if err != nil {
+		return "", 0, err
+	}
+	defer os.Remove(tmp)
+	dst, err := os.OpenFile(tmp, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", 0, err
+	}
+	h := sha256.New()
+	size, err := io.Copy(io.MultiWriter(dst, h), r)
+	if cerr := dst.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("write layer blob: %w", err)
+	}
+	digest := "sha256:" + hex.EncodeToString(h.Sum(nil))
+	if err := os.Rename(tmp, s.BlobPath(digest)); err != nil {
+		return "", 0, fmt.Errorf("store layer blob: %w", err)
+	}
+	return digest, size, nil
+}
+
+// RegisterRecord unpacks an image's layers into its chain directory when
+// needed and saves the record, so that a locally built image behaves exactly
+// like a pulled one.
+func (s *Store) RegisterRecord(rec *Record, progress func(string)) error {
+	if err := s.EnsureDirs(); err != nil {
+		return err
+	}
+	if progress == nil {
+		progress = func(string) {}
+	}
+	if err := unpackBlobToChain(s, rec, LoadOptions{}, progress); err != nil {
+		return err
+	}
+	return s.SaveRecord(rec)
+}
+
 // LoadOptions controls archive import.
 type LoadOptions struct {
 	// Tag names the imported image, for example "myapp:latest".

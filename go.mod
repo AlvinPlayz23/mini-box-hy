@@ -8,4 +8,5 @@ require (
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
+	gopkg.in/yaml.v3 v3.0.1
 )

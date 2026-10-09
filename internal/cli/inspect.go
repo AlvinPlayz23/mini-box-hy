@@ -5,6 +5,8 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/AlvinPlayz23/minibox/internal/container"
 	"github.com/AlvinPlayz23/minibox/internal/image"
@@ -116,6 +118,18 @@ func systemCommand(env *Env, args []string) error {
 	if err := container.PruneRuntimeState(env.Store, func(msg string) { fmt.Fprintln(env.Stdout, msg) }); err != nil {
 		return err
 	}
+	// Named volumes nobody references, plus the layer cache of builds.
+	if store, err := volumeStore(env); err == nil {
+		if removed, err := store.Prune(volumesInUse(env)); err == nil {
+			for _, name := range removed {
+				fmt.Fprintf(env.Stdout, "removed volume %s\n", name)
+			}
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(env.Store.Root, "build", "cache")); err != nil {
+		return err
+	}
+	fmt.Fprintln(env.Stdout, "removed the build layer cache")
 	fmt.Fprintln(env.Stdout, "prune complete")
 	return nil
 }

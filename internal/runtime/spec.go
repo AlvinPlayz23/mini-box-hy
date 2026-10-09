@@ -25,12 +25,80 @@ type Config struct {
 	ReadOnly   bool      `json:"read_only,omitempty"`
 	Init       bool      `json:"init,omitempty"`
 	Created    time.Time `json:"created"`
+	// Restart is the restart policy: no, on-failure[:max] or always.
+	// Foreground runs ignore it (the CLI returns when the container exits);
+	// detached containers are restarted by the shim.
+	Restart string `json:"restart,omitempty"`
+	// HealthCheck probes the container while it runs. Nil disables probing.
+	HealthCheck *HealthCheck `json:"healthcheck,omitempty"`
 
 	Rootfs    Rootfs    `json:"rootfs"`
 	Mounts    []Mount   `json:"mounts,omitempty"`
 	Network   Network   `json:"network"`
 	Resources Resources `json:"resources,omitempty"`
 	Security  Security  `json:"security"`
+}
+
+// HealthCheck describes a container health probe, mirroring the compose and
+// Docker healthcheck options.
+type HealthCheck struct {
+	// Test is ["CMD", argv...] or ["CMD-SHELL", script].
+	Test []string `json:"test"`
+	// Interval between probes (default 30s).
+	Interval time.Duration `json:"interval,omitempty"`
+	// Timeout for a single probe (default 30s).
+	Timeout time.Duration `json:"timeout,omitempty"`
+	// Retries before the container is reported unhealthy (default 3).
+	Retries int `json:"retries,omitempty"`
+	// StartPeriod grace period before failures count (default 0).
+	StartPeriod time.Duration `json:"start_period,omitempty"`
+}
+
+// Defaults for a health check that leaves fields unset.
+const (
+	DefaultHealthInterval = 30 * time.Second
+	DefaultHealthTimeout  = 30 * time.Second
+	DefaultHealthRetries  = 3
+)
+
+// Normalize fills in the defaults for unset health check fields.
+func (h *HealthCheck) Normalize() {
+	if h == nil {
+		return
+	}
+	if h.Interval <= 0 {
+		h.Interval = DefaultHealthInterval
+	}
+	if h.Timeout <= 0 {
+		h.Timeout = DefaultHealthTimeout
+	}
+	if h.Retries <= 0 {
+		h.Retries = DefaultHealthRetries
+	}
+}
+
+// Command returns the argv to execute inside the container for one probe.
+func (h *HealthCheck) Command() ([]string, error) {
+	if h == nil || len(h.Test) == 0 {
+		return nil, nil
+	}
+	switch h.Test[0] {
+	case "NONE":
+		return nil, nil
+	case "CMD":
+		if len(h.Test) < 2 {
+			return nil, nil
+		}
+		return h.Test[1:], nil
+	case "CMD-SHELL":
+		if len(h.Test) < 2 {
+			return nil, nil
+		}
+		return []string{"/bin/sh", "-c", h.Test[1]}, nil
+	default:
+		// A bare string is a shell command, as compose treats it.
+		return []string{"/bin/sh", "-c", h.Test[0]}, nil
+	}
 }
 
 // Rootfs describes where the container's root filesystem comes from.

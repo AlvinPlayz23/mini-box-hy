@@ -10,13 +10,15 @@ hi
 
 ## Status
 
-Milestones M1-M8 of [PLAN.md](PLAN.md) are implemented: namespaces and
+Milestones M1-M10 of [PLAN.md](PLAN.md) are implemented: namespaces and
 `pivot_root`, cgroup v2 limits, layered storage with whiteout handling, the full
 lifecycle CLI with a detached shim, registry pulls with digest verification and
-streaming unpack, networking (`none`, `host`, `bridge`, `pasta`) and the
-security defaults (capability sets, `no_new_privs`, seccomp, masked paths,
-rootless user namespaces). M9 (volumes beyond bind/tmpfs, build, compose) and
-M10 (performance pass) are not started.
+streaming unpack, networking (`none`, `host`, `bridge`, `pasta`), the security
+defaults (capability sets, `no_new_privs`, seccomp, masked paths, rootless user
+namespaces), named volumes, health checks, restart policies, `minibox build`,
+a compose-like `up`/`down`, a Docker-compatible API on a socket, and the M10
+performance pass. Lazy pulling (eStargz/SOCI) is deliberately not implemented;
+see [docs/DECISIONS.md](docs/DECISIONS.md).
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for what has been measured and
 which parts still need a real Linux host to verify.
@@ -63,6 +65,28 @@ minibox exec -it web sh
 minibox stop -t 5 web
 minibox rm -f web
 minibox inspect web
+
+# volumes
+minibox volume create appdata
+minibox run --rm -v appdata:/var/lib/appdata alpine sh -c 'echo hi > /var/lib/appdata/x'
+minibox volume ls / inspect appdata / rm appdata / prune
+
+# health checks and restart policies (restart needs -d)
+minibox run -d --health-cmd 'wget -q -O- http://localhost/ || exit 1' \
+    --health-interval 5s --health-retries 3 -p 8080:80 nginx:alpine
+minibox run -d --restart on-failure:5 alpine sh -c 'do-work || exit 1'
+
+# build images (Dockerfile subset: FROM RUN COPY ENV WORKDIR CMD ENTRYPOINT
+# USER LABEL EXPOSE ARG) with layer caching
+minibox build -t myapp:dev .
+
+# compose-like projects
+minibox up -d -f compose.yaml        # start every service in depends_on order
+minibox down --volumes               # stop and remove the project
+
+# Docker-compatible API on a unix socket (ping, version, containers, images)
+minibox serve --socket /run/minibox/minibox.sock &
+curl --unix-socket /run/minibox/minibox.sock http://localhost/_ping
 
 # images
 minibox pull alpine:3.20
@@ -112,8 +136,17 @@ real Linux host or VM; `scripts/run-integration.sh` sets up the temp state root.
 ## Limitations (v1)
 
 * Linux only, cgroup v2 only (no cgroup v1 or hybrid hosts).
-* No image building, no Compose, no restart policies, no health checks yet.
-* Volumes are bind mounts and tmpfs; there are no named volumes.
+* `minibox build` caches at instruction granularity but rebuilds the tagged
+  image as base layers plus one cumulative delta layer, so images built here are
+  not byte-identical to Docker's per-instruction layers.
+* `COPY --from=<stage>` (multi-stage copies) is not implemented yet, and build
+  steps run with `--network none`.
+* Compose support covers services, images, build, command, environment, ports,
+  volumes, depends_on, restart, healthcheck, user, working_dir, hostname,
+  cap_add/cap_drop, mem_limit, cpus, pids_limit, network_mode, labels, tty and
+  init; `profiles`, `secrets`, `configs`, `deploy` and `extends` are ignored.
+* The API socket is not socket-activated; run `minibox serve` under a systemd
+  unit if you want it on demand.
 * `exec` works for rootful containers; rootless `exec` would need a
   user-namespace join, which is not implemented (see `docs/SECURITY.md`).
 * `run -d -t` does not allocate a pseudo-terminal yet; detached containers log
@@ -122,7 +155,8 @@ real Linux host or VM; `scripts/run-integration.sh` sets up the temp state root.
   layer store it twice. Layer-level sharing is future work.
 * The seccomp default profile starts permissive-but-documented: it permits the
   syscalls this kernel knows except Docker's default denied set. Tightening it
-  is planned in M9/M10.
+  remains future work (see docs/SECURITY.md).
+* Detached containers get no stdin stream; `run -d -t` allocates no pty.
 
 ## Documentation
 

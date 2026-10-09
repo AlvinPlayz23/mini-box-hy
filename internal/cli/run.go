@@ -16,35 +16,42 @@ import (
 	"github.com/AlvinPlayz23/minibox/internal/image"
 	"github.com/AlvinPlayz23/minibox/internal/runtime"
 	"github.com/AlvinPlayz23/minibox/internal/security"
+	"github.com/AlvinPlayz23/minibox/internal/volume"
 )
 
 // runOptions collects the parsed `minibox run` flags.
 type runOptions struct {
-	detach     bool
-	autoRm     bool
-	name       string
-	tty        bool
-	stdin      bool
-	env        stringList
-	volumes    stringList
-	workdir    string
-	user       string
-	publish    stringList
-	network    string
-	hostname   string
-	memory     string
-	memorySwap string
-	cpus       string
-	pidsLimit  string
-	readOnly   bool
-	initProc   bool
-	capAdd     stringList
-	capDrop    stringList
-	seccomp    string
-	platform   string
-	dryRun     bool
-	image      string
-	command    []string
+	detach         bool
+	autoRm         bool
+	name           string
+	tty            bool
+	stdin          bool
+	env            stringList
+	volumes        stringList
+	workdir        string
+	user           string
+	publish        stringList
+	network        string
+	hostname       string
+	memory         string
+	memorySwap     string
+	cpus           string
+	pidsLimit      string
+	readOnly       bool
+	initProc       bool
+	capAdd         stringList
+	capDrop        stringList
+	seccomp        string
+	platform       string
+	dryRun         bool
+	restart        string
+	healthCmd      string
+	healthInterval string
+	healthTimeout  string
+	healthRetries  int
+	healthStart    string
+	image          string
+	command        []string
 }
 
 // parseRunFlags parses run flags without consuming IMAGE/CMD.
@@ -80,6 +87,12 @@ func parseRunFlags(args []string, name string) (*runOptions, error) {
 	fs.StringVar(&o.seccomp, "seccomp", "default", "")
 	fs.StringVar(&o.platform, "platform", "", "")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "")
+	fs.StringVar(&o.restart, "restart", "", "")
+	fs.StringVar(&o.healthCmd, "health-cmd", "", "")
+	fs.StringVar(&o.healthInterval, "health-interval", "", "")
+	fs.StringVar(&o.healthTimeout, "health-timeout", "", "")
+	fs.IntVar(&o.healthRetries, "health-retries", 0, "")
+	fs.StringVar(&o.healthStart, "health-start-period", "", "")
 
 	if err := parseFlags(fs, args); err != nil {
 		return nil, err
@@ -225,6 +238,9 @@ func buildConfig(ctx context.Context, env *Env, opts *runOptions) (*runtime.Conf
 		cfg.Hostname = "minibox"
 	}
 	cfg.Network.Hostname = cfg.Hostname
+	if err := applyHealthAndRestart(cfg, opts); err != nil {
+		return nil, err
+	}
 
 	if err := applyResources(cfg, opts); err != nil {
 		return nil, err
@@ -232,13 +248,69 @@ func buildConfig(ctx context.Context, env *Env, opts *runOptions) (*runtime.Conf
 	if err := applySecurity(cfg, opts); err != nil {
 		return nil, err
 	}
-	if err := applyMounts(cfg, opts); err != nil {
+	if err := applyMounts(cfg, opts, env); err != nil {
 		return nil, err
 	}
 	cfg.Network.Mode = netCfg.Mode
 	cfg.Network.Ports = netCfg.Ports
-	cfg.Network.DNS = hostDNS()
+	if netCfg.Mode != "none" {
+		// A container without networking has no use for resolv.conf.
+		cfg.Network.DNS = hostDNS()
+	}
 	return cfg, nil
+}
+
+// applyHealthAndRestart validates --restart and --health-* flags.
+func applyHealthAndRestart(cfg *runtime.Config, opts *runOptions) error {
+	if opts.restart != "" {
+		policy, _, err := container.ParseRestartPolicy(opts.restart)
+		if err != nil {
+			return err
+		}
+		if !opts.detach && policy != "no" {
+			return usageError("--restart needs -d: a foreground container returns when it exits, so nothing can restart it")
+		}
+		cfg.Restart = opts.restart
+	}
+	if opts.healthCmd == "" {
+		if opts.healthInterval != "" || opts.healthTimeout != "" || opts.healthRetries != 0 || opts.healthStart != "" {
+			return usageError("--health-interval/--health-timeout/--health-retries/--health-start-period need --health-cmd")
+		}
+		return nil
+	}
+	check := &runtime.HealthCheck{Test: []string{"CMD-SHELL", opts.healthCmd}}
+	var err error
+	if opts.healthInterval != "" {
+		if check.Interval, err = parseDurationFlag(opts.healthInterval, "--health-interval"); err != nil {
+			return err
+		}
+	}
+	if opts.healthTimeout != "" {
+		if check.Timeout, err = parseDurationFlag(opts.healthTimeout, "--health-timeout"); err != nil {
+			return err
+		}
+	}
+	if opts.healthStart != "" {
+		if check.StartPeriod, err = parseDurationFlag(opts.healthStart, "--health-start-period"); err != nil {
+			return err
+		}
+	}
+	check.Retries = opts.healthRetries
+	check.Normalize()
+	cfg.HealthCheck = check
+	return nil
+}
+
+// parseDurationFlag parses a duration flag such as "30s" or "1m30s".
+func parseDurationFlag(value, name string) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, usageError("invalid %s value %q: use a duration such as 30s or 1m30s", name, value)
+	}
+	if d <= 0 {
+		return 0, usageError("invalid %s value %q: must be positive", name, value)
+	}
+	return d, nil
 }
 
 // ensureImage returns the stored image, pulling it when it is missing.
@@ -363,10 +435,11 @@ func applySecurity(cfg *runtime.Config, opts *runOptions) error {
 	return nil
 }
 
-// applyMounts translates -v flags into mounts.
-func applyMounts(cfg *runtime.Config, opts *runOptions) error {
+// applyMounts translates -v flags into mounts, resolving named volumes against
+// the volume store.
+func applyMounts(cfg *runtime.Config, opts *runOptions, env *Env) error {
 	for _, spec := range opts.volumes {
-		m, err := parseVolume(spec)
+		m, err := parseVolume(spec, env)
 		if err != nil {
 			return err
 		}
@@ -375,8 +448,8 @@ func applyMounts(cfg *runtime.Config, opts *runOptions) error {
 	return nil
 }
 
-// parseVolume parses SRC:DST[:ro] and tmpfs:DST[:opts].
-func parseVolume(spec string) (runtime.Mount, error) {
+// parseVolume parses SRC:DST[:ro], NAME:DST[:ro] and tmpfs:DST[:opts].
+func parseVolume(spec string, env *Env) (runtime.Mount, error) {
 	parts := strings.Split(spec, ":")
 	if len(parts) < 2 {
 		return runtime.Mount{}, usageError("invalid volume %q: expected SRC:DST[:ro]", spec)
@@ -385,6 +458,24 @@ func parseVolume(spec string) (runtime.Mount, error) {
 		m := runtime.Mount{Type: "tmpfs", Destination: parts[1]}
 		if len(parts) > 2 && parts[2] != "" && parts[2] != "ro" {
 			m.Options = strings.Split(parts[2], ",")
+		}
+		return m, nil
+	}
+	if volume.IsName(parts[0]) {
+		store, err := volumeStore(env)
+		if err != nil {
+			return runtime.Mount{}, err
+		}
+		v, err := store.Ensure(parts[0])
+		if err != nil {
+			return runtime.Mount{}, err
+		}
+		m := runtime.Mount{Type: "bind", Source: v.Mountpoint, Destination: parts[1]}
+		if len(parts) > 2 {
+			if parts[2] != "ro" {
+				return runtime.Mount{}, usageError("invalid volume option %q: only :ro is supported", parts[2])
+			}
+			m.ReadOnly = true
 		}
 		return m, nil
 	}
