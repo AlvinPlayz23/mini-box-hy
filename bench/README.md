@@ -9,6 +9,27 @@ RUNS=100 bench/run.sh debian:stable-slim cat /etc/os-release
 BENCH_APPEND=1 bench/run.sh      # also append the numbers to docs/BENCHMARKS.md
 ```
 
+`bench/compare.sh` is the three-runtime comparison: debian and ollama, measured
+with minibox, docker and podman side by side. Per runtime and image it records
+pull time and image size on disk, warm `run --rm IMAGE true` latency
+(hyperfine), and for ollama the time from `run -d -p 11434:11434` until
+`/api/version` answers plus the serving container's resident memory. It also
+prints the idle memory of each runtime's background processes, where minibox's
+zero-daemon design shows up directly.
+
+```console
+$ make bench-compare                    # debian + ollama, all three runtimes
+$ bench/compare.sh debian:stable-slim   # one image
+$ PULL_ONLY=1 bench/compare.sh          # measurement without containers
+$ BENCH_APPEND=1 bench/compare.sh       # append both tables to docs/BENCHMARKS.md
+```
+
+Runtimes that are installed but unusable (no `docker info`, no `podman info`)
+are reported by name in the report header with the reason, and a run where
+fewer than two runtimes could be measured exits non-zero so CI notices. The
+ollama serving test needs working published ports (`-p`), so run it rootful
+(bridge) or with pasta.
+
 `bench/matrix.sh` is the image spread: it pulls everything listed in
 `bench/images.txt` (minimal, apt-based, multi-layer, language runtime, and a
 multi-GiB AI image) and records pull wall time, peak RSS and disk per image.

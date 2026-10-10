@@ -28,6 +28,14 @@ test-integration: build
 bench: build
 	./bench/run.sh
 
+## bench-compare: minibox vs docker vs podman on debian and ollama
+bench-compare: build
+	./bench/compare.sh
+
+## bench-matrix: pull/memory/disk across the images in bench/images.txt
+bench-matrix: build
+	./bench/matrix.sh
+
 ## lint: formatting and vet
 lint: fmt vet
 

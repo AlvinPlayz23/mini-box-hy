@@ -31,10 +31,10 @@ the layer directory.
 
 ## Comparing against Docker, Podman and crun
 
-The comparison harness is `bench/run.sh`: it measures `minibox run --rm` against
-`docker run --rm`, `podman run --rm` and a raw `crun` bundle on the same machine,
-the same image and the same command, using `hyperfine --warmup 5 --runs 50` when
-hyperfine is present and a shell timing loop otherwise. `bench/README.md`
+Two harnesses cover this. `bench/run.sh` is the hyperfine latency comparison on
+one image (`minibox` vs `docker` vs `podman` vs a raw `crun` bundle, 50 runs);
+`bench/compare.sh` (next section) is the wider comparison over debian and ollama
+that also measures pull time, disk, time-to-serving and memory. `bench/README.md`
 documents the flags, and `bench/make-bundle.sh` builds the crun bundle.
 
 **Status: no comparison numbers yet, and this is a limitation of the development
@@ -59,6 +59,41 @@ $ BENCH_APPEND=1 bench/run.sh                 # append the table here
 The integration suite's `TestM10StartupAndSize` records the CLI-side floor
 (process spawn plus runtime init) on any host that can run the binary, and
 `bench/startup.sh` records the same numbers with a shell harness.
+
+## Three-runtime comparison: minibox vs docker vs podman
+
+`bench/compare.sh` (also `make bench-compare`) measures the same images with the
+three runtimes, so the numbers are directly comparable:
+
+| metric | how it is taken |
+|---|---|
+| pull | wall time of `pull IMAGE` per runtime |
+| warm run | `run --rm --network host IMAGE true`, hyperfine `--warmup 2 --runs 10`, else a timing loop |
+| on disk | minibox: blobs plus unpacked layers in the state root; docker/podman: `.Size` from `image inspect` |
+| time to serving | ollama only: seconds from `run -d -p 11434:11434 ollama/ollama` until `GET /api/version` answers |
+| container RSS | ollama only: resident memory of the serving container's host pid |
+| background memory | sum of RSS of `dockerd`/`containerd`/`podman` processes, versus minibox's zero |
+
+Default images: `debian:stable-slim` and `ollama/ollama:latest`. Knobs:
+`RUNS`, `WARMUP`, `OLLAMA_PORT`, `READY_TIMEOUT`, `RUNTIMES`, `SKIP_PULL`,
+`PULL_ONLY=1` (measurement without starting containers) and `BENCH_APPEND=1`
+(append both markdown tables to this file). Runtimes that cannot be used are
+named in the report header with the reason, and a run with fewer than two
+usable runtimes exits non-zero.
+
+**Status in the development sandbox (verified):** the harness runs end to end -
+it measured minibox pulling debian (1.65 s, 29 MB of blobs and 76 MB of layers)
+and ollama (72 s for 3.5 GiB), reported the exact reason `run` cannot start
+containers here (the overlay mount is refused), and produced the ollama serving
+table. Both table paths - warm-run latency and time-to-serving/RSS - were also
+exercised against a stub runtime so the comparison columns are known to work.
+
+**Real docker and podman numbers are still pending**, for the reasons in the
+section above: this sandbox cannot create namespaces (so nothing can start a
+container) and podman is not installable from its package index. Run
+`make bench-compare` on a host with a working docker daemon and/or podman to fill
+the table; the harness records everything needed, including why a runtime was
+skipped.
 
 ## Image matrix (pull, memory, disk)
 
