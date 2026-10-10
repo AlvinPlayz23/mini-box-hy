@@ -193,6 +193,27 @@ image. The simplest option that preserves correctness is the current streaming
 unpack, which already never buffers a whole layer in memory; lazy pulling is
 left as future work with this note as the starting point.
 
+**Seccomp is installed immediately before `execve`, not during setup.** The
+filter used to be installed before the supervisor handshake, which meant any
+filter fault showed up as the process dying mid-setup ("container init exited
+during setup: EOF") instead of as a legible error, and left setup code running
+under the filter. It is now the last step before `execve` (both for the user
+command and for the `--init` reaper), and the container init reports panics over
+the sync socket so a crash can never again surface as a bare EOF.
+
+**The seccomp filter is verified by evaluating it, not by inspecting it.**
+`internal/security/seccomp_filter_test.go` contains a small BPF interpreter that
+runs a generated program against seccomp_data exactly as the kernel does and
+asserts the decision for allowed syscalls, denied syscalls, unknown syscalls, a
+foreign architecture and the x32 ABI; a sweep asserts no native syscall can ever
+reach the kill action. This was added after the filter turned out to have two
+decision bugs that the earlier structural assertions could not see: an inverted
+architecture check (`Jt`/`Jf` swapped, which killed every container on its first
+syscall) and a wrong rule jump target (which made every allow-rule after the
+first unreachable, so almost every syscall returned EPERM).
+`seccomp_live_test.go` additionally installs the real filter in a child process
+and requires it to survive, skipping on emulated kernels such as gVisor.
+
 **Seccomp is still the permissive default.** M8 shipped the builder and the
 Docker-like denied set; M9/M10 did not tighten it, because an incomplete
 allow-list breaks real images and could not be integration-tested in the

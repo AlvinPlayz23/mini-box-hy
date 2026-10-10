@@ -26,14 +26,28 @@ func TestDefaultProfileFilter(t *testing.T) {
 	if last.K != uint32(Errno(unix.EPERM)) {
 		t.Errorf("final instruction action = %#x, want EPERM", last.K)
 	}
-	if !containsActionFor(t, filter, "mount", uint32(Errno(unix.EPERM))) {
-		t.Error("mount is not denied")
+	// Decisions are asserted through the interpreter, because a filter can be
+	// structurally plausible and still decide the wrong action (see
+	// seccomp_filter_test.go).
+	native, ok := nativeArch()
+	if !ok {
+		t.Skip("no native arch token on this platform")
 	}
-	if !containsActionFor(t, filter, "read", seccompRetAllow) {
-		t.Error("read is not allowed")
-	}
-	if !containsActionFor(t, filter, "execve", seccompRetAllow) {
-		t.Error("execve is not allowed")
+	for _, tc := range []struct {
+		syscall string
+		want    uint32
+	}{
+		{"read", seccompRetAllow},
+		{"execve", seccompRetAllow},
+		{"mount", uint32(Errno(unix.EPERM))},
+	} {
+		nr, ok := SyscallNumber(tc.syscall)
+		if !ok {
+			continue
+		}
+		if got := evalFilter(t, filter, native, nr); got != tc.want {
+			t.Errorf("%s decides %#x, want %#x", tc.syscall, got, tc.want)
+		}
 	}
 }
 
@@ -47,11 +61,25 @@ func TestStrictProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if containsActionFor(t, filter, "socket", seccompRetAllow) {
-		t.Error("strict profile allowed socket")
+	native, ok := nativeArch()
+	if !ok {
+		t.Skip("no native arch token on this platform")
 	}
-	if !containsActionFor(t, filter, "write", seccompRetAllow) {
-		t.Error("strict profile did not allow write")
+	for _, tc := range []struct {
+		syscall string
+		want    uint32
+	}{
+		{"write", seccompRetAllow},
+		{"socket", uint32(Errno(unix.EPERM))},
+		{"read", seccompRetAllow},
+	} {
+		nr, ok := SyscallNumber(tc.syscall)
+		if !ok {
+			continue
+		}
+		if got := evalFilter(t, filter, native, nr); got != tc.want {
+			t.Errorf("strict profile decides %#x for %s, want %#x", got, tc.syscall, tc.want)
+		}
 	}
 }
 
@@ -79,22 +107,4 @@ func TestFilterInstructionCountIsLinear(t *testing.T) {
 	if len(full) <= len(small) {
 		t.Errorf("full filter (%d) should be larger than small (%d)", len(full), len(small))
 	}
-}
-
-// containsActionFor reports whether the filter contains an equality test for
-// the named syscall immediately followed by the given action.
-func containsActionFor(t *testing.T, filter []unix.SockFilter, name string, action uint32) bool {
-	t.Helper()
-	nr, ok := SyscallNumber(name)
-	if !ok {
-		t.Skipf("syscall %q not known on this architecture", name)
-	}
-	for i := 0; i+1 < len(filter); i++ {
-		if filter[i].Code == (bpfJMP|bpfJEQ|bpfK) && filter[i].K == nr {
-			if filter[i+1].Code == (bpfRET|bpfK) && filter[i+1].K == action {
-				return true
-			}
-		}
-	}
-	return false
 }

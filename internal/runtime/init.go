@@ -51,14 +51,6 @@ func (c *Config) Save(path string) error {
 // root filesystem and security context, synchronises with the supervisor and
 // finally execs the user command. It only returns on error.
 func Init() error {
-	configPath := os.Getenv(EnvConfig)
-	if configPath == "" {
-		return fmt.Errorf("%s is not set: `minibox init` is an internal command", EnvConfig)
-	}
-	cfg, err := LoadConfig(configPath)
-	if err != nil {
-		return err
-	}
 	syncFD, err := strconv.Atoi(os.Getenv(EnvSyncFD))
 	if err != nil {
 		return fmt.Errorf("%s is not set: `minibox init` is an internal command", EnvSyncFD)
@@ -69,6 +61,29 @@ func Init() error {
 			fmt.Fprintf(sync, "%s %s\n", errToken, strings.ReplaceAll(err.Error(), "\n", " "))
 		}
 		return err
+	}
+	// Anything that kills this process before it can speak used to reach the
+	// supervisor as a bare "container init exited during setup: EOF". A panic
+	// now reports itself first, so the failure is legible.
+	defer func() {
+		if r := recover(); r != nil {
+			stack := make([]byte, 8<<10)
+			stack = stack[:runtime.Stack(stack, false)]
+			trace := strings.ReplaceAll(string(stack), "\n", " | ")
+			if len(trace) > 600 {
+				trace = trace[:600] + " ..."
+			}
+			_ = report(fmt.Errorf("panic during container setup: %v (stack: %s)", r, trace))
+		}
+	}()
+
+	configPath := os.Getenv(EnvConfig)
+	if configPath == "" {
+		return report(fmt.Errorf("%s is not set: `minibox init` is an internal command", EnvConfig))
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return report(err)
 	}
 
 	// Fallback cgroup placement for kernels without CLONE_INTO_CGROUP.
@@ -265,7 +280,10 @@ func applyIdentity(cfg *Config) error {
 	return nil
 }
 
-// applySecurity installs capabilities, no_new_privs and the seccomp filter.
+// applySecurity installs the capability set and no_new_privs, and validates the
+// requested seccomp profile. The filter itself is installed by execUser as the
+// last step before execve, so that a filter fault can never be mistaken for a
+// setup failure and no runtime syscall happens after it is in force.
 func applySecurity(cfg *Config) error {
 	caps, err := security.ParseCapabilities(cfg.Security.Capabilities)
 	if err != nil {
@@ -285,9 +303,20 @@ func applySecurity(cfg *Config) error {
 		}
 	}
 	switch cfg.Security.Seccomp {
+	case "unconfined", "", "default":
+		return nil
+	default:
+		return fmt.Errorf("unknown seccomp profile %q", cfg.Security.Seccomp)
+	}
+}
+
+// applySeccompFilter installs the configured seccomp profile on the calling
+// thread. It runs immediately before execve.
+func applySeccompFilter(cfg *Config) error {
+	switch cfg.Security.Seccomp {
 	case "unconfined", "":
 		return nil
-	case "default":
+	default:
 		filter, err := security.BuildFilter(security.DefaultProfile())
 		if err != nil {
 			return fmt.Errorf("build seccomp filter: %w", err)
@@ -296,8 +325,6 @@ func applySecurity(cfg *Config) error {
 			return fmt.Errorf("apply seccomp filter: %w", err)
 		}
 		return nil
-	default:
-		return fmt.Errorf("unknown seccomp profile %q", cfg.Security.Seccomp)
 	}
 }
 
@@ -351,9 +378,15 @@ func execUser(cfg *Config) error {
 		// The reaper runs the command as a child so that it can forward
 		// signals and reap zombies.
 		reaperArgs := append([]string{"minibox-init"}, args...)
+		if err := applySeccompFilter(cfg); err != nil {
+			return err
+		}
 		if err := syscall.Exec("/dev/.minibox-init", reaperArgs, env); err != nil {
 			return fmt.Errorf("exec the built-in init: %w", err)
 		}
+	}
+	if err := applySeccompFilter(cfg); err != nil {
+		return err
 	}
 	if err := syscall.Exec(path, args, env); err != nil {
 		return fmt.Errorf("exec %s: %w", path, err)

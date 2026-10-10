@@ -207,7 +207,10 @@ func BuildFilter(p Profile) ([]unix.SockFilter, error) {
 	filter := make([]unix.SockFilter, 0, 5+2*len(rules))
 	filter = append(filter,
 		unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: seccompDataArch},
-		unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 0, Jf: 1, K: arch},
+		// JEQ jumps to Jt when the architectures match, so Jt must skip over
+		// the kill and Jf must fall through to it. Getting this backwards
+		// kills every process on its first syscall.
+		unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 1, Jf: 0, K: arch},
 		unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetKillProcess},
 		unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: seccompDataNr},
 	)
@@ -219,12 +222,14 @@ func BuildFilter(p Profile) ([]unix.SockFilter, error) {
 			unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetKillProcess},
 		)
 	}
-	for i, r := range rules {
+	for _, r := range rules {
 		filter = append(filter, unix.SockFilter{
 			Code: bpfJMP | bpfJEQ | bpfK,
 			Jt:   0,
-			Jf:   uint8(1 + 2*(len(rules)-i-1)),
-			K:    r.nr,
+			// Not equal: skip this rule's return and fall on the next rule's
+			// test (or, after the last rule, on the default action below).
+			Jf: 1,
+			K:  r.nr,
 		})
 		filter = append(filter, unix.SockFilter{Code: bpfRET | bpfK, K: uint32(r.action)})
 	}
