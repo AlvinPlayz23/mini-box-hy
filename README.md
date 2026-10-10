@@ -123,6 +123,7 @@ choice.
 ## Testing
 
 ```console
+$ minibox doctor         # what this host supports (caps, cgroups, overlay, nft, pasta)
 $ make bench-compare     # minibox vs docker vs podman on debian and ollama
 $ bench/matrix.sh        # pull/memory/disk across bench/images.txt (incl. an AI image)
 $ make test              # unit tests, no root, no network (-short)
@@ -151,6 +152,9 @@ real Linux host or VM; `scripts/run-integration.sh` sets up the temp state root.
   unit if you want it on demand.
 * `exec` works for rootful containers; rootless `exec` would need a
   user-namespace join, which is not implemented (see `docs/SECURITY.md`).
+* A non-root `--user` runs with no capabilities, like Docker; `--cap-add` is
+  ignored for it (minibox warns). Capabilities the host does not provide are
+  skipped with a warning, and `minibox doctor` shows which ones.
 * `run -d -t` does not allocate a pseudo-terminal yet; detached containers log
   to `containers/<id>/log` and `minibox logs -f` follows it.
 * Images are unpacked per image (flattened chain): two images sharing a base

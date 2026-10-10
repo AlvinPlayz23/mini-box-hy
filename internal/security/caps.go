@@ -4,12 +4,89 @@ package security
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
+
+// capabilitySets reads the bounding, permitted and effective masks of the
+// calling process from /proc/self/status.
+func capabilitySets() (bounding, permitted, effective map[int]bool, err error) {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("read /proc/self/status: %w", err)
+	}
+	status := string(data)
+	if bounding, err = ParseCapabilityMask(status, "CapBnd"); err != nil {
+		return nil, nil, nil, err
+	}
+	if permitted, err = ParseCapabilityMask(status, "CapPrm"); err != nil {
+		return nil, nil, nil, err
+	}
+	if effective, err = ParseCapabilityMask(status, "CapEff"); err != nil {
+		return nil, nil, nil, err
+	}
+	return bounding, permitted, effective, nil
+}
+
+// ParseCapabilityMask extracts one capability mask (for example "CapBnd") from
+// the contents of /proc/self/status.
+func ParseCapabilityMask(status, field string) (map[int]bool, error) {
+	for _, line := range strings.Split(status, "\n") {
+		if !strings.HasPrefix(line, field+":") {
+			continue
+		}
+		mask, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(line, field+":")), 16, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s value %q: %w", field, line, err)
+		}
+		out := map[int]bool{}
+		for bit := 0; bit <= unix.CAP_LAST_CAP && bit < 64; bit++ {
+			if mask&(1<<uint(bit)) != 0 {
+				out[bit] = true
+			}
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("no %s line in /proc/self/status", field)
+}
+
+// SplitGrantable separates requested capabilities into the ones this process
+// can actually install and the names of those it cannot.
+//
+// Two restrictions are common in practice and both must degrade to a warning
+// rather than a failed container:
+//
+//   - the bounding set is smaller than the requested set (Railway, Kubernetes
+//     restricted profiles, gVisor and nested containers all drop capabilities);
+//   - the process already lost its capabilities, which is what setuid does when
+//     the image or --user names a non-root user. Without CAP_SETPCAP in the
+//     effective set the kernel only lets a process narrow its permitted set.
+func SplitGrantable(caps []int) (available []int, unavailable []string) {
+	bounding, permitted, effective, err := capabilitySets()
+	if err != nil {
+		// Without the masks, assume everything is available and let capset
+		// decide; the error path then reports the real reason.
+		return caps, nil
+	}
+	return splitGrantable(caps, bounding, permitted, effective[unix.CAP_SETPCAP])
+}
+
+// splitGrantable is the pure decision behind SplitGrantable.
+func splitGrantable(caps []int, bounding, permitted map[int]bool, haveSetPCAP bool) (available []int, unavailable []string) {
+	for _, c := range caps {
+		if bounding[c] && (haveSetPCAP || permitted[c]) {
+			available = append(available, c)
+			continue
+		}
+		unavailable = append(unavailable, CapabilityName(c))
+	}
+	sort.Strings(unavailable)
+	return available, unavailable
+}
 
 // capName is a Linux capability name and its number.
 type capName struct {
@@ -197,21 +274,28 @@ func ResolveCapabilities(add, drop []string) ([]int, error) {
 // ApplyCapabilities installs the given capability set on the calling thread:
 // permitted/effective/inheritable are set to caps, the bounding set is reduced
 // to caps, and the ambient set is cleared. It must run after uid/gid changes.
-func ApplyCapabilities(caps []int) error {
+//
+// Capabilities the host's bounding set does not provide are skipped and
+// returned by name, so a restricted host (Railway, Kubernetes restricted
+// profiles, gVisor, nested containers) still runs containers instead of failing
+// with "capset: operation not permitted". Callers should warn about the
+// returned names.
+func ApplyCapabilities(caps []int) (unavailable []string, err error) {
+	grantable, unavailable := SplitGrantable(caps)
 	want := make(map[int]bool, len(caps))
-	for _, c := range caps {
+	for _, c := range grantable {
 		want[c] = true
 	}
 	// Keep capabilities across the uid transition: needed when a non-root
 	// --user is combined with --cap-add.
 	if err := unix.Prctl(unix.PR_SET_KEEPCAPS, 1, 0, 0, 0); err != nil {
-		return fmt.Errorf("prctl(PR_SET_KEEPCAPS): %w", err)
+		return unavailable, fmt.Errorf("prctl(PR_SET_KEEPCAPS): %w", err)
 	}
 
 	var data [2]unix.CapUserData
-	for _, c := range caps {
+	for _, c := range grantable {
 		if c < 0 || c > unix.CAP_LAST_CAP {
-			return fmt.Errorf("capability %d out of range", c)
+			return unavailable, fmt.Errorf("capability %d out of range", c)
 		}
 		bit := uint32(1) << (uint(c) % 32)
 		data[c/32].Effective |= bit
@@ -220,25 +304,33 @@ func ApplyCapabilities(caps []int) error {
 	}
 	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	if err := unix.Capset(&hdr, &data[0]); err != nil {
-		return fmt.Errorf("capset: %w", err)
+		if len(unavailable) > 0 {
+			return unavailable, fmt.Errorf("capset %v: %w (this host's bounding set also lacks %s)",
+				CapabilityNames(grantable), err, strings.Join(unavailable, ", "))
+		}
+		return unavailable, fmt.Errorf("capset: %w", err)
 	}
 
 	// Reduce the bounding set: caps dropped here can never be regained, even
-	// through setuid binaries.
+	// through setuid binaries. Dropping needs CAP_SETPCAP, which the caller may
+	// have asked us to drop, and which a user namespace does not need; both
+	// cases are tolerated, and no_new_privs still blocks privilege gains.
 	for _, c := range capabilities {
 		if want[c.Num] {
 			continue
 		}
-		if err := unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(c.Num), 0, 0, 0); err != nil && err != unix.EINVAL {
-			return fmt.Errorf("prctl(PR_CAPBSET_DROP, %s): %w", c.Name, err)
+		if err := unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(c.Num), 0, 0, 0); err != nil &&
+			err != unix.EINVAL && err != unix.EPERM {
+			return unavailable, fmt.Errorf("prctl(PR_CAPBSET_DROP, %s): %w", c.Name, err)
 		}
 	}
 
 	// Clear ambient capabilities so execve does not re-raise them.
-	if err := unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0); err != nil && err != unix.EINVAL {
-		return fmt.Errorf("prctl(PR_CAP_AMBIENT_CLEAR_ALL): %w", err)
+	if err := unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0); err != nil &&
+		err != unix.EINVAL && err != unix.EPERM {
+		return unavailable, fmt.Errorf("prctl(PR_CAP_AMBIENT_CLEAR_ALL): %w", err)
 	}
-	return nil
+	return unavailable, nil
 }
 
 // SetNoNewPrivs sets PR_SET_NO_NEW_PRIVS, preventing privilege gains through
@@ -246,27 +338,6 @@ func ApplyCapabilities(caps []int) error {
 func SetNoNewPrivs() error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("prctl(PR_SET_NO_NEW_PRIVS): %w", err)
-	}
-	return nil
-}
-
-// RestoreCapabilities re-installs the effective capability set after a uid or
-// gid change cleared it. PR_SET_KEEPCAPS keeps the permitted set across the
-// transition; this call puts the caps back into the effective set.
-func RestoreCapabilities(caps []int) error {
-	var data [2]unix.CapUserData
-	for _, c := range caps {
-		if c < 0 || c > unix.CAP_LAST_CAP {
-			return fmt.Errorf("capability %d out of range", c)
-		}
-		bit := uint32(1) << (uint(c) % 32)
-		data[c/32].Effective |= bit
-		data[c/32].Permitted |= bit
-		data[c/32].Inheritable |= bit
-	}
-	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-	if err := unix.Capset(&hdr, &data[0]); err != nil {
-		return fmt.Errorf("capset after uid change: %w", err)
 	}
 	return nil
 }

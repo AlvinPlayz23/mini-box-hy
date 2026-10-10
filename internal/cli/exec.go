@@ -230,6 +230,7 @@ func joinNamespaces(pid int, rootless bool) error {
 // applyExecSecurity applies the container's identity and security settings to
 // the exec'd process.
 func applyExecSecurity(cfg *runtime.Config, user string) error {
+	uid := -1
 	if user != "" {
 		spec, err := runtime.ParseUserSpec(user)
 		if err != nil {
@@ -249,13 +250,19 @@ func applyExecSecurity(cfg *runtime.Config, user string) error {
 				return err
 			}
 		}
+		uid = spec.UID
 	}
-	caps, err := security.ParseCapabilities(cfg.Security.Capabilities)
-	if err != nil {
-		return err
-	}
-	if err := security.ApplyCapabilities(caps); err != nil {
-		return err
+	// setuid cleared the capability sets and an unprivileged process cannot
+	// re-add them, so a non-root --user gets no capabilities (as in Docker).
+	// The seccomp filter below still applies.
+	if uid <= 0 {
+		caps, err := security.ParseCapabilities(cfg.Security.Capabilities)
+		if err != nil {
+			return err
+		}
+		if _, err := security.ApplyCapabilities(caps); err != nil {
+			return err
+		}
 	}
 	if cfg.Security.Seccomp == "default" {
 		filter, err := security.BuildFilter(security.DefaultProfile())

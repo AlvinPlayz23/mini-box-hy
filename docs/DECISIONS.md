@@ -220,6 +220,37 @@ allow-list breaks real images and could not be integration-tested in the
 development sandbox. `docs/SECURITY.md` lists it as gap #1 and the builder
 already supports strict profiles.
 
+## Capabilities on restricted hosts and with a non-root user
+
+Two field failures shaped this area, both reported from a Railway VM running
+`gccharles/nextjs-demo-app` (an image whose config sets `USER nextjs`):
+
+**A non-root `--user` runs without capabilities.** `setuid` clears the permitted
+and effective sets, and without CAP_SETPCAP in the effective set the kernel only
+lets a process narrow its permitted set, so the capability installation that
+followed the uid change failed with `capset: operation not permitted`. minibox
+now skips capability installation when the resolved uid is non-zero, keeps
+`no_new_privs` and the seccomp filter, and warns if `--cap-add` was requested
+(which is ignored, exactly as Docker ignores it for non-root users). The
+alternative, retaining capabilities across the uid change with
+`PR_SET_KEEPCAPS`, would hand a non-root user capabilities that Docker does not,
+so it was rejected. The same rule applies to `minibox exec --user`.
+
+**Capabilities the host does not provide are dropped, not fatal.** Hosts
+routinely ship a smaller bounding set than the Docker-like default (Railway,
+Kubernetes restricted profiles, gVisor, any nested container). `ApplyCapabilities`
+now intersects the request with the bounding set *and* with what the process can
+actually install (`SplitGrantable`), applies the intersection, and returns the
+names it could not grant so the container init prints one warning line and the
+container still starts. `PR_CAPBSET_DROP` and the ambient clear tolerate `EPERM`
+for the same reason: `--cap-drop ALL` removes CAP_SETPCAP itself, and a user
+namespace does not need the bounding set reduced.
+
+`minibox doctor` reports this class of problem directly: kernel and cgroup v2
+state, the capability difference against the default set, seccomp and user
+namespace availability, overlayfs, state-root writability, and whether `nft`,
+`pasta`, `newuidmap` and `newgidmap` are present, each with the action to take.
+
 ## Deviations from PLAN.md worth knowing
 
 * The plan's `docs/` list did not include `docs/SECURITY.md` in section 2.4 but

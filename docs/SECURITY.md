@@ -44,7 +44,13 @@ channels (Spectre-class), or a compromised registry serving malicious *content*
 * **`--read-only`:** remounts the container root filesystem read-only (mounts
   such as `/proc`, `/dev` and volumes stay writable).
 * **`--user`:** runs the container command as the given uid/gid, resolved
-  against the image's `/etc/passwd` and `/etc/group` when names are used.
+  against the image's `/etc/passwd` and `/etc/group` when names are used. A
+  non-root user runs with **no capabilities** (setuid clears them and the kernel
+  will not re-add them), which matches Docker; `--cap-add` is ignored in that
+  case and minibox warns about it.
+* **Restricted hosts:** capabilities that the host's bounding set does not
+  provide are dropped with a warning rather than failing the container, and
+  `minibox doctor` lists exactly which ones are missing.
 * **Image extraction:** layer entries with absolute paths or `..` components are
   rejected, as are writes through symlinks that point outside the layer
   directory; extraction also aborts when a layer exceeds the configured

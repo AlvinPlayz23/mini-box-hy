@@ -143,6 +143,8 @@ func RunWithEnv(env *Env, args []string) int {
 		runErr = downCommand(env, rest)
 	case "serve":
 		runErr = serveCommand(env, rest)
+	case "doctor":
+		runErr = doctorCommand(env, rest)
 	// Hidden commands used by the runtime.
 	case "shim":
 		return shimCommand(env, rest)
@@ -236,6 +238,8 @@ Usage:
   minibox up [-f FILE] [-d] [SERVICE...]  start a compose project
   minibox down [-f FILE] [--volumes]      stop and remove a compose project
   minibox serve [--socket PATH] [--tcp ADDR]   Docker-compatible API server
+  minibox doctor                         check what this host supports
+  minibox doctor                         check what this host supports
   minibox version                        print the version
 
 run flags:

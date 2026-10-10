@@ -109,10 +109,11 @@ func Init() error {
 	// From here on, per-thread state (uid, capabilities, seccomp) must stay on
 	// the thread that execs the user command.
 	runtime.LockOSThread()
-	if err := applyIdentity(cfg); err != nil {
+	uid, err := applyIdentity(cfg)
+	if err != nil {
 		return report(err)
 	}
-	if err := applySecurity(cfg); err != nil {
+	if err := applySecurity(cfg, uid); err != nil {
 		return report(err)
 	}
 
@@ -252,50 +253,74 @@ func replaceFile(path string, content []byte, mode os.FileMode) error {
 	return nil
 }
 
-// applyIdentity switches to the configured user and group.
-func applyIdentity(cfg *Config) error {
+// applyIdentity switches to the configured user and group and returns the
+// resolved uid (-1 when no user was requested), which the security stage needs
+// because setuid decides whether capabilities can still be installed.
+func applyIdentity(cfg *Config) (int, error) {
 	if cfg.User == "" {
-		return nil
+		return -1, nil
 	}
 	spec, err := ParseUserSpec(cfg.User)
 	if err != nil {
-		return err
+		return -1, err
 	}
 	if err := spec.Lookup("/"); err != nil {
-		return err
+		return -1, err
 	}
 	if spec.HasGID {
 		if err := unix.Setgroups([]int{spec.GID}); err != nil && err != unix.EPERM {
-			return fmt.Errorf("set supplementary groups: %w", err)
+			return -1, fmt.Errorf("set supplementary groups: %w", err)
 		}
 		if err := unix.Setgid(spec.GID); err != nil {
-			return fmt.Errorf("set gid to %d: %w", spec.GID, err)
+			return -1, fmt.Errorf("set gid to %d: %w", spec.GID, err)
 		}
 	}
 	if spec.HasUID {
 		if err := unix.Setuid(spec.UID); err != nil {
-			return fmt.Errorf("set uid to %d: %w", spec.UID, err)
+			return -1, fmt.Errorf("set uid to %d: %w", spec.UID, err)
 		}
 	}
-	return nil
+	return spec.UID, nil
 }
 
 // applySecurity installs the capability set and no_new_privs, and validates the
 // requested seccomp profile. The filter itself is installed by execUser as the
 // last step before execve, so that a filter fault can never be mistaken for a
 // setup failure and no runtime syscall happens after it is in force.
-func applySecurity(cfg *Config) error {
+func applySecurity(cfg *Config, uid int) error {
 	caps, err := security.ParseCapabilities(cfg.Security.Capabilities)
 	if err != nil {
 		return err
 	}
-	if err := security.ApplyCapabilities(caps); err != nil {
+	// setuid clears the permitted and effective capability sets, and without
+	// CAP_SETPCAP in the effective set the kernel refuses to add them back, so
+	// a non-root --user runs with no capabilities. Docker behaves the same way;
+	// the alternative is retaining capabilities across the uid change with
+	// PR_SET_KEEPCAPS, which would hand the user capabilities Docker does not.
+	if uid > 0 {
+		if len(cfg.Security.CapAdd) > 0 {
+			fmt.Fprintf(os.Stderr, "minibox: warning: --cap-add is ignored for the non-root user %q; "+
+				"capabilities are only installed for uid 0\n", cfg.User)
+		}
+		if cfg.Security.NoNewPrivs {
+			return security.SetNoNewPrivs()
+		}
+		return nil
+	}
+	unavailable, err := security.ApplyCapabilities(caps)
+	if err != nil {
 		return fmt.Errorf("apply capabilities: %w", err)
 	}
-	if cfg.User != "" {
-		if err := security.RestoreCapabilities(caps); err != nil {
-			return err
+	if len(unavailable) > 0 {
+		// Restricted hosts (Railway, Kubernetes restricted profiles, gVisor,
+		// nested containers) do not provide the full Docker-like set; the
+		// container still runs, minus those capabilities.
+		word := "it"
+		if len(unavailable) > 1 {
+			word = "them"
 		}
+		fmt.Fprintf(os.Stderr, "minibox: warning: this host's bounding set lacks %s; the container runs without %s\n",
+			strings.Join(unavailable, ", "), word)
 	}
 	if cfg.Security.NoNewPrivs {
 		if err := security.SetNoNewPrivs(); err != nil {
